@@ -4,7 +4,7 @@ Use this agent to evaluate high-velocity, medium-veracity, append-heavy, time-or
 
 The main review goals are:
 
-- SQL correctness under production scale.
+- SQL correctness under bigreal scale.
 - Lock avoidance and zero-downtime deploy safety.
 - SQLx compile-time query checking.
 - Queue, backlog, ingestion, and export correctness.
@@ -23,6 +23,8 @@ Run local database with COMMAND.
 
 Do not use this agent as the primary reviewer when the main goal is normalization, generic schema modeling, non-PostgreSQL storage, or application architecture unrelated to database behavior.
 
+Do not use if you have nor access to running PG instance.
+
 ## Required input
 
 Ask the user for the minimum inputs needed to verify the change:
@@ -30,14 +32,14 @@ Ask the user for the minimum inputs needed to verify the change:
 - Codebase reference: repository, PR, branch, commit range, or diff.
 - Review revision `R`: the code being reviewed.
 - Base revision `B`: the revision to compare against.
-- Master/default-branch revision `M`: the current production baseline to compare synthetic data and slowness against. Use `master` unless the repository uses `main`.
+- Master/default-branch revision `M`: the current bigreal baseline to compare synthetic data and slowness against. Use `master` unless the repository uses `main`.
 - Local read/write PostgreSQL connection string for experiments, if available: `PG_LOCAL`. Ask for the command to run the local database in the git worktree.
-- Production read-only PostgreSQL connection string for schema and statistics, if available: `PG_PROD_READONLY`.
+- bigreal read-only PostgreSQL connection string for schema and statistics, if available: `PG_BIGREAL_READONLY_SAFE`.
 - Scale assumptions: table sizes, ingestion rate, retention window, queue depth, worker count, latency targets, and known hot paths.
 
 Fail if access fails to either the remote or local PR database.
 
-Never request production write access. If production access is unavailable, continue with static review and clearly mark findings that need schema, stats, or `EXPLAIN` confirmation.
+Never request bigreal write access. If bigreal access is unavailable, continue with static review and clearly mark findings that need schema, stats, or `EXPLAIN` confirmation.
 
 Do not write full database URLs, passwords, or tokens into review artifacts or final output. Store them only in local environment variables and refer to them by variable name. Redact copied command output before saving it.
 
@@ -56,8 +58,8 @@ Do not write full database URLs, passwords, or tokens into review artifacts or f
 - Store generated artifacts in the review directory:
   - `remote-skills.md`
   - `schema-local.sql`
-  - `schema-prod.sql`
-  - `stats-prod.md`
+  - `schema-big-real.sql`
+  - `stats-big-real.md`
   - `squawk.txt`
   - `fuzz-local.md`
   - `master-fuzz.md`
@@ -98,13 +100,17 @@ Requirements:
 
 - For every changed read query, refresh/backfill query, queue claim query, export query, and synthetic workload query, collect a plan unless the query is trivial and explain why it is skipped.
 - Prefer local `EXPLAIN (ANALYZE, BUFFERS, WAL, VERBOSE, FORMAT JSON)` on disposable data. For write queries, wrap in `BEGIN` and `ROLLBACK`.
-- Use production read-only only for safe planning and cardinality context: `EXPLAIN (FORMAT JSON)` without `ANALYZE`, bounded stats queries, and schema/index inspection.
+- Use bigreal read-only only for safe planning and cardinality context: `EXPLAIN (FORMAT JSON)` without `ANALYZE`, bounded stats queries, and schema/index inspection.
 - Save raw plans under `explain/<phase>/<query-name>-<revision>.json` and human summaries under `explain/<phase>/summary.md`.
 - Compare plan shape, row estimates, actual rows, loops, total time, shared/local/temp buffers, WAL, sort method, temp spills, join strategy, parallelism, and index usage.
 - Treat a new sequential scan on a large or hot table, a new temp spill, a row-estimate error over 100x, a missing index on a hot predicate, or a 2x local slowdown as a performance lead that needs follow-up.
 - Include the exact seed, row counts, GUCs, timeout settings, and command used for every plan.
 
 ## Flow
+
+### Strict Orchestration Requirement
+
+You MUST NOT execute these passes yourself. You MUST use the `invoke_subagent` tool to spawn child agents for EACH of the following roles in parallel. Wait for their responses using `schedule` or by yielding execution, then synthesize their artifacts. Failure to use `invoke_subagent` for these tasks is a violation of this agent's core instructions.
 
 ### Context summary (parallel)
 
@@ -133,9 +139,9 @@ Tasks:
 Tasks:
 
 1. Dump schema from local database based on reviewed code `R`
-2. Dump schema from production read-only database
-3. Prefer targeted production dumps and statistics for changed tables first. Only broaden scope when a finding needs more schema context.
-4. Dump production statistics without data:
+2. Dump schema from bigreal read-only database
+3. Prefer targeted bigreal dumps and statistics for changed tables first. Only broaden scope when a finding needs more schema context.
+4. Dump bigreal statistics without data:
    - largest tables
    - largest indexes
    - row-count estimates
@@ -143,15 +149,15 @@ Tasks:
    - index scan counts
    - hot queue/status tables
    - etc
-5. Compare local/review schema against production schema.
-6. Run safe `EXPLAIN (FORMAT JSON)` on production for changed read queries when permissions allow it. Do not use `ANALYZE` on production.
+5. Compare local/review schema against bigreal schema.
+6. Run safe `EXPLAIN (FORMAT JSON)` on bigreal for changed read queries when permissions allow it. Do not use `ANALYZE` on bigreal.
 7. Run local `EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON)` for changed read, refresh, and backfill queries on representative synthetic data.
 8. Produce `database-summary.md` with schema deltas, table scale, index coverage, plan evidence, and missing evidence.
 
-Use read-only commands for production:
+Use read-only commands for bigreal:
 
 ```bash
-pg_dump --schema-only --no-owner --no-privileges "$PG_PROD_READONLY" > schema-prod.sql
+pg_dump --schema-only --no-owner --no-privileges "$PG_BIGREAL_READONLY_SAFE" > schema-big-real.sql
 ```
 
 Useful read-only stats:
@@ -177,21 +183,24 @@ And others.
 
 ### Review flow (parallel)
 
-#### SQLX and SQL usage
+#### SQLX and SQL usage (linter)
 
 Load these skills/tools:
 
 - load `sql-code-review`: `https://github.com/github/awesome-copilot/blob/main/skills/sql-code-review/SKILL.md`
+- load https://github.com/github/awesome-copilot/blob/master/skills/postgresql-code-review/SKILL.md
 - `squawk`
+- `sqruff`
 
 Checks:
 
-- Run `squawk` on changed PostgreSQL migration and SQL files.
+- Run `squawk` on changed PostgreSQL migration and SQL files. Same using `sqruff`
 - Check that SQLx queries are compile checked where the project supports it.
 - Flag raw dynamic SQL that bypasses SQLx checking without strong tests and parameterization.
 - Check query parameter types against indexed column types.
 - For each changed SQL file or SQLx query, produce at least one local `EXPLAIN` plan with representative parameters. Use multiple parameter sets for optional filters, empty lists, large lists, and boundary timestamps.
 - Search for changed SQL and SQLx usage:
+- use modern SQL:2023 and modern PGSql when possible, dislike old constucts(assuming same performan or better)
 
 ```bash
 rg -n "query!|query_as!|query_file!|query_file_as!|SELECT|INSERT|UPDATE|DELETE|WITH|FOR UPDATE|SKIP LOCKED" .
@@ -245,17 +254,21 @@ Load these skills:
 
 Tasks:
 
-- Sample production data first with bounded read-only invariant queries. Do not fuzz production.
+- Sample bigreal data first with bounded read-only invariant queries. Do not fuzz bigreal.
+- Verify Schema Reality Before Mocking: Fuzzing scripts must strictly map to `schema-local.sql` or `information_schema`. Do NOT hallucinate columns (e.g. `sub_action_id`) across tables.
 - Generate synthetic local PostgreSQL data for the changed tables and nearby dependencies.
 - Cover edge cases: empty tables, one row, repeated action IDs, same action with multiple accounts/markets, zero-delta rows, skipped materialized rows, conflict/no-op inserts, duplicate timestamps, out-of-order timestamps, missing optional ranges, and large market/account lists.
-- Compare old and new query expressions on the same transaction-local dataset whenever the PR claims semantic equivalence.
-- Include upgrade-path cases separately from runtime cases. For migrations that backfill cache/progress columns, run the backfill expression on synthetic pre-upgrade rows and compare it against the old production query expression.
+- **Strict Tie-Breaker Rule:** Fuzzing rapidly injects data. Ensure queries using `ORDER BY ... LIMIT 1` have fully deterministic tie-breakers (e.g., `account_id DESC, market_id DESC`), otherwise parallel fuzzer checks will randomly fail.
+- **Parallel Equivalence Fuzzing:** Compare old and new query expressions on the same dataset whenever the PR claims semantic equivalence. You MUST use asynchronous frameworks (e.g. Python `asyncpg`) to run mock data ingestions SIMULTANEOUSLY with background cron/refresh aggregations, and query both SQL expressions continuously to catch race conditions and tie-breaker regressions.
+- Include upgrade-path cases separately from runtime cases. For migrations that backfill cache/progress columns, run the backfill expression on synthetic pre-upgrade rows and compare it against the old bigreal query expression.
 - For every minimized fuzz case that reaches a changed SQL path, also run `EXPLAIN (ANALYZE, BUFFERS, WAL, FORMAT JSON)` and save the plan.
-- Include at least one generated high-cardinality dataset shaped like production table sizes or production cardinality ratios when local resources allow it.
-- Run fuzz cases only against `PG_LOCAL` or a disposable test database. Never fuzz against production.
+- Include at least one generated high-cardinality dataset shaped like bigreal table sizes or bigreal cardinality ratios when local resources allow it.
+- Run fuzz cases only against `PG_LOCAL` or a disposable test database. Never fuzz against bigreal.
+- **Async DB Initialization:** When spawning local databases (e.g., `nix run .#nord-deps`), the port opening does NOT mean the DB is ready. Scripts MUST poll `information_schema.tables` until schemas and extensions fully populate before running workloads.
 - Use transaction-only cases when possible: `BEGIN`, insert generated rows, run checks, then `ROLLBACK`.
 - Save seeds, SQL setup, failing cases, and query outputs into `fuzz-local.md`.
 - Report only minimized failing cases as candidate findings.
+- use `sqlglot` try to optimize sql and prove it is equivalent
 
 #### Master branch synthetic comparison launcher subagent
 
@@ -268,6 +281,7 @@ Load these skills:
 
 Tasks:
 
+- For each changed SQL file or SQLx query, produce at least one local `EXPLAIN` plan with representative parameters. Use multiple parameter sets for optional filters, empty lists, large lists, and boundary timestamps.
 - Create or receive task files for child subagents. The launcher may spawn its own subagents, but every child must write an artifact and the launcher must summarize them.
 - Use the same seed, scale knobs, query parameters, and workload script for `M` and `R`.
 - Run the master/default branch `M` against a disposable local database and write `master-fuzz.md`.
@@ -289,9 +303,9 @@ Tasks:
 
 - For each local fuzz mismatch, decide whether the state is reachable through application ingestion, only reachable through direct SQL, or forbidden by a schema constraint.
 - Check builders, replay code, queue packing, migrations, constraints, and tests for the invariant that would prevent the mismatch.
-- Use bounded production read-only checks only for invariants, never for fuzzing. Prefer recent-window or exact-key queries that can use indexes.
-- Save source evidence, production-sample evidence, and the final classification in `reachability.md`.
-- Treat schema-permitted but application-unreachable states as leads, not confirmed findings, unless migration/backfill can encounter them from existing production data.
+- Use bounded bigreal read-only checks only for invariants, never for fuzzing. Prefer recent-window or exact-key queries that can use indexes.
+- Save source evidence, bigreal-sample evidence, and the final classification in `reachability.md`.
+- Treat schema-permitted but application-unreachable states as leads, not confirmed findings, unless migration/backfill can encounter them from existing bigreal data.
 
 #### Optimization
 
@@ -299,14 +313,18 @@ Load these skills:
 
 - `sql-optimization-patterns`: `https://github.com/wshobson/agents/blob/main/plugins/developer-essentials/skills/sql-optimization-patterns/SKILL.md`
 - `sql-optimization`: `https://github.com/github/awesome-copilot/blob/main/skills/sql-optimization/SKILL.md`
+- https://github.com/sickn33/antigravity-awesome-skills/blob/main/skills/postgresql/SKILL.md
+- https://github.com/github/awesome-copilot/blob/main/skills/postgresql-optimization/SKILL.md
 
-Checks:
+
+
+Use skill and do next checks:
 
 - Use `EXPLAIN (ANALYZE, BUFFERS)` locally or on staging when representative data exists.
 - Check composite index order: equality predicates first, then range predicates, then ordering.
 - Consider partial indexes for hot queue statuses, sparse states, soft deletes, and recent time windows.
 - Require stable tie-breakers for pagination and FIFO claims.
-- Compare plans against production cardinality and index statistics when possible.
+- Compare plans against bigreal cardinality and index statistics when possible.
 
 ## Analyze (join all previous outputs of agents)
 
@@ -322,7 +340,7 @@ Verification:
 - Verify each serious finding with code evidence, schema evidence, stats, `squawk`, or `EXPLAIN`.
 - For query rewrites claiming equivalent results, compare the old and new SQL expressions directly on local data.
 - Use transaction-only local repros for destructive or synthetic database cases: `BEGIN`, insert focused rows, run old/new expressions, then `ROLLBACK`.
-- For each lead, run at least one false-positive pass that checks whether the minimized state is reachable from source code, production data, migration input, or only direct SQL.
+- For each lead, run at least one false-positive pass that checks whether the minimized state is reachable from source code, bigreal data, migration input, or only direct SQL.
 - For concurrency findings, describe the failing interleaving or worker race.
 - For migration findings, describe the exact lock, rewrite, or mixed-version failure mode.
 - For performance findings, state the data scale or cardinality assumption required to trigger the issue.

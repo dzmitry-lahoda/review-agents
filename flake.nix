@@ -24,11 +24,18 @@
         {
           default = pkgs.mkShell {
             packages = [
+              pkgs.bashInteractive
               codegraph.packages.${system}.default
               pkgs.postgresql
               pkgs.python3
               pkgs.uv
+              pkgs.python314Packages.sqlglot
+              pkgs.sqruff
               unstablePkgs.squawk
+              pkgs.git
+              pkgs.ripgrep
+              pkgs.jujutsu
+              pkgs.eza
             ];
           };
         });
